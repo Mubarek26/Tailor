@@ -1,0 +1,181 @@
+# Tailor Shop Design Patterns Technical Guide
+This guide provides an in-depth, step-by-step breakdown of how the design patterns implemented in the **Tailor Shop Management System** operate in code. Use this guide to master the codebase, write your project report, and ace your group presentation.
+
+---
+
+## 🧭 Pattern 1: Strategy Pattern (Encapsulating Calculations)
+### 📁 File: [paymentStrategies.js](file:///c:/Users/admin/Desktop/Tailor%20shop/payments-service/src/services/paymentStrategies.js)
+
+The **Strategy Pattern** is a behavioral design pattern that defines a family of algorithms, encapsulates each one inside a class, and makes them interchangeable at runtime.
+
+```
+       [ PaymentStrategy (Abstract Class) ]
+                       ▲
+                       │  (Inherits & Implements compute())
+             ┌─────────┴─────────┐
+             │                   │
+    [ DepositStrategy ]   [ FullPaymentStrategy ]
+```
+
+### How the Code Executes (Step-by-Step)
+1. **Request Received:** A user enters a transaction in the UI. The frontend hits `POST /payments` on the Payments Microservice.
+2. **Factory Invoked:** The Payments controller receives the `payment_type` (either `'deposit'` or `'full'`) from the request body. It calls the factory method:
+   ```javascript
+   const strategy = paymentStrategyFactory(payment_type);
+   ```
+3. **Strategy Returned:** The factory instantiates and returns the corresponding concrete strategy class:
+   * If `'deposit'`, it returns an instance of `DepositStrategy`.
+   * If `'full'`, it returns an instance of `FullPaymentStrategy`.
+4. **Formula Executed Polymorphically:** The controller calls `.compute()` on the returned strategy object:
+   ```javascript
+   const nextBalance = strategy.compute({
+     total: order.total_price,
+     currentDeposit: order.deposit,
+     amount: Number(amount),
+   });
+   ```
+   Because both strategies inherit from the abstract base class `PaymentStrategy`, they share the identical `.compute()` method signature. The caller does not need to know which class it is executing.
+   * **DepositStrategy Flow:** Adds the new payment amount to the existing deposit and subtracts it from the order's total price to compute `remaining_price`.
+   * **FullPaymentStrategy Flow:** Instantly sets the deposit to the order total and resets the `remaining_price` to `0` (clearing the balance).
+
+---
+
+## 🏭 Pattern 2: Factory (Simple Factory) Pattern (Decoupling Creation)
+### 📁 File: [paymentStrategies.js](file:///c:/Users/admin/Desktop/Tailor%20shop/payments-service/src/services/paymentStrategies.js)
+
+The **Simple Factory Pattern** encapsulates the instantiation logic of a family of related products (the strategies) in a single place.
+
+### How the Code Executes (Step-by-Step)
+1. **Controller Call:** In `payments.controller.js`, instead of importing the concrete `DepositStrategy` and `FullPaymentStrategy` classes directly, the controller imports the single factory function:
+   ```javascript
+   const { paymentStrategyFactory } = require('../../services/paymentStrategies');
+   ```
+2. **Matching Identification:** The factory receives the raw parameter string:
+   ```javascript
+   const paymentStrategyFactory = (paymentType) => {
+     if (paymentType === 'deposit') return new DepositStrategy();
+     if (paymentType === 'full') return new FullPaymentStrategy();
+     throw new AppError('Invalid payment_type', 400);
+   };
+   ```
+3. **Benefit realized:** The controller is completely insulated from class creation. If you add a new payment strategy in the future (e.g. `InstallmentStrategy`), you only have to modify the factory function. The rest of the payment controller remains untouched!
+
+---
+
+## 🔔 Pattern 3: Observer Pattern (Decoupled Messaging)
+### 📁 Files: 
+* Payments: [paymentEvents.js](file:///c:/Users/admin/Desktop/Tailor%20shop/payments-service/src/events/paymentEvents.js) & [notificationHandlers.js](file:///c:/Users/admin/Desktop/Tailor%20shop/payments-service/src/services/notificationHandlers.js)
+* Orders: [orderEvents.js](file:///c:/Users/admin/Desktop/Tailor%20shop/backend/src/events/orderEvents.js) & [orderObserver.js](file:///c:/Users/admin/Desktop/Tailor%20shop/backend/src/observers/orderObserver.js)
+
+The **Observer Pattern** is a behavioral pattern where an object (the Subject) maintains a list of dependents (Observers) and automatically notifies them of state changes.
+
+```
+ [Orders Controller (Subject)]
+            │
+            ▼  (1. Emits STATUS_CHANGED event)
+    [ orderEvents Bus ]
+            │
+            ├─► [ ConsoleSmsNotificationAdapter (Observer) ] ──► (Prints simulated SMS)
+            │
+            └─► [ EmailNotificationAdapter (Observer) ] ────────► (Sends actual Email via Resend)
+```
+
+### How the Code Executes (Step-by-Step)
+1. **Bootstrapping Observers:** When the backend application boots up (`backend/src/app.js`), it executes `setupOrderObservers()`. This function hooks observers into the event bus:
+   ```javascript
+   orderEvents.on(ORDER_EVENTS.STATUS_CHANGED, async (payload) => { ... });
+   ```
+2. **State Change occurs:** A tailor updates the status of a customer suit from `'pending'` to `'in_progress'`.
+3. **Event Fired:** The order controller completes the database transaction and immediately broadcasts the event along with the data payload:
+   ```javascript
+   orderEvents.emit(ORDER_EVENTS.STATUS_CHANGED, {
+     order: orderDoc,
+     customer: orderDoc.customer_id,
+   });
+   ```
+4. **Asynchronous Notification Triggered:** The observer catches the broadcast, extracts the payload, formats a friendly message, and invokes the notification adapters asynchronously without blocking the REST controller's response to the tailor's browser.
+
+---
+
+## 🔌 Pattern 4: Adapter Pattern (Standardizing APIs)
+### 📁 Files:
+* Notifications: [notificationAdapter.js](file:///c:/Users/admin/Desktop/Tailor%20shop/backend/src/services/notificationAdapter.js)
+* Order API client: [orderClient.js](file:///c:/Users/admin/Desktop/Tailor%20shop/payments-service/src/services/orderClient.js)
+
+The **Adapter Pattern** translates the interface of a class or library into a standardized interface that clients expect.
+
+### How the Code Executes (Step-by-Step)
+1. **Defined Interface:** The abstract base class `NotificationAdapter` defines a unified method signature:
+   ```javascript
+   async send({ recipient, subject, message }) { ... }
+   ```
+2. **Different Technologies adapted:**
+   * **Resend Email API Wrapper:** The `EmailNotificationAdapter` translates the standardized `.send()` signature into a call to the custom `sendEmail` Resend configuration.
+   * **Console SMS Adapter:** The `ConsoleSmsNotificationAdapter` maps the identical `.send()` method to a console logger to simulate an SMS cellular gateway.
+3. **Usage via polymorphic execution:** The `orderObserver` obtains the correct adapter from a helper factory and invokes it uniformly:
+   ```javascript
+   const adapter = getNotificationAdapter('sms'); // or 'email'
+   await adapter.send({ recipient, subject, message });
+   ```
+   Both adapters expose the same external structure (`send`), hiding their vastly different inner operations from the caller.
+
+---
+
+## 💍 Pattern 5: Singleton Pattern (Reusing Heavy Connections)
+### 📁 Files: [db.js (Payments)](file:///c:/Users/admin/Desktop/Tailor%20shop/payments-service/src/config/db.js) & [db.js (Backend)](file:///c:/Users/admin/Desktop/Tailor%20shop/backend/src/config/db.js)
+
+The **Singleton Pattern** restricts the instantiation of a class to a single, globally accessible instance.
+
+### How the Code Executes (Step-by-Step)
+1. **Cache initialized:** The database connection module declares a top-level private variable in its module scope:
+   ```javascript
+   let connectionPromise = null;
+   ```
+2. **First Connection Request:** The application calls `connectDb()`. Since `connectionPromise` is null, the block triggers Mongoose to connect to the cluster:
+   ```javascript
+   connectionPromise = mongoose.connect(env.mongoUri).then(() => {
+     console.log('Connected to MongoDB');
+     return mongoose.connection;
+   });
+   ```
+3. **Subsequent Connection Requests:** If the application triggers a connection check or re-initiation later, the `if (!connectionPromise)` condition evaluates to false. It instantly returns the cached `connectionPromise`.
+4. **Benefit realized:** The application maintains exactly one database connection pool. This avoids connection leaks, protects database resources, and ensures optimal performance.
+
+---
+
+## 🏛️ Pattern 6: Facade Pattern (Simplifying Microservice Communication)
+### 📁 File: [paymentsClient.js](file:///c:/Users/admin/Desktop/Tailor%20shop/backend/src/services/paymentsClient.js)
+
+The **Facade Pattern** provides a simplified, higher-level interface to a complex set of classes or interfaces in a subsystem.
+
+### How the Code Executes (Step-by-Step)
+1. **Subsystem hidden:** Calling a remote microservice requires configuring Axios, setting timeouts, injecting `x-service-token` authentication headers, serializing payload bodies, and parsing nested HTTP responses.
+2. **Facade introduced:** Instead of exposing these networking complexities to controllers, the `paymentsClient.js` wraps them up inside simple, clean methods:
+   ```javascript
+   const createPayment = async (payload) => {
+     const res = await client.post('/payments', payload, { headers: serviceHeaders() });
+     return res.data;
+   };
+   ```
+3. **Controller interaction:** The backend orders controller processes payments in a single, readable line of Javascript:
+   ```javascript
+   const data = await paymentsClient.createPayment(req.body);
+   ```
+
+---
+
+## 🔗 Pattern 7: Chain of Responsibility Pattern (Sequential Middlewares)
+### 📁 File: [orders.routes.js](file:///c:/Users/admin/Desktop/Tailor%20shop/backend/src/modules/orders/orders.routes.js)
+
+The **Chain of Responsibility Pattern** passes a request along a pipeline of handlers. Each handler decides either to process the request or pass it to the next handler in the chain.
+
+### How the Code Executes (Step-by-Step)
+1. **Request arrives:** A user requests a list of orders.
+2. **Middlewares traversed:** The request enters Express's routing chain:
+   ```javascript
+   router.get('/', protect, restrictTo('owner', 'superadmin'), listOrders);
+   ```
+   * **Handler 1 (`protect`):** Inspects the session cookie. If authenticated, calls `next()`. If unauthenticated, breaks the chain and returns `401 Unauthorized`.
+   * **Handler 2 (`restrictTo`):** Inspects the user's role. If role is `'owner'`, calls `next()`. If role is `'tailor'`, breaks the chain and returns `403 Forbidden`.
+   * **Handler 3 (`listOrders`):** Processes the request, queries the database, and returns the list of orders.
+3. **Benefit realized:** Security, access rules, validation, and endpoint logic are cleanly decoupled, modularized, and execute in a highly extensible order of execution.
